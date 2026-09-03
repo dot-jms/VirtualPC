@@ -1,0 +1,17 @@
+{
+  "name": "Browser Gaming Desktop",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "forwardPorts": [6080, 8085],
+  "portsAttributes": {
+    "6080": {
+      "label": "Desktop (noVNC) — add /vnc.html to the URL, password: vscode",
+      "onAutoForward": "notify"
+    },
+    "8085": {
+      "label": "Audio stream (optional)",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start.sh"
+}
