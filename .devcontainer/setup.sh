@@ -1,27 +1,48 @@
 #!/bin/bash
 # Runs ONCE automatically when the codespace is first created (postCreateCommand).
+#
+# Everything is also mirrored to ~/setup.log — if this looks "stuck" in the
+# Creation Log view, open a second terminal (Terminal -> New Terminal) and run:
+#   tail -f ~/setup.log
+# to watch it live.
+
+LOG_FILE=~/setup.log
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+TOTAL_STEPS=9
+STEP=0
+step() {
+  STEP=$((STEP+1))
+  echo ""
+  echo "=================================================="
+  echo "[STEP $STEP/$TOTAL_STEPS] $1   ($(date '+%H:%M:%S'))"
+  echo "=================================================="
+}
+
+trap 'echo ""; echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"; echo "SETUP FAILED at step $STEP, line $LINENO."; echo "Check ~/setup.log for the full output above this line."; echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"' ERR
+
 set -e
 
-echo "Installing desktop + gaming stack — this takes several minutes the first time..."
+echo "Starting full setup. This normally takes 5-10 minutes total —"
+echo "long gaps of no new output during 'apt install' steps are NORMAL,"
+echo "it's downloading/unpacking packages, not frozen."
 
-### Clear any apt lock a background auto-update might be holding
+step "Clearing any apt locks"
 sudo killall apt apt-get dpkg 2>/dev/null || true
 sudo dpkg --configure -a
+echo "-> done"
 
-### Non-interactive installs (skips the hidden keyboard-layout prompt that can freeze installs)
+step "Installing desktop + VNC stack (this is the biggest step, ~2-4 min)"
 export DEBIAN_FRONTEND=noninteractive
-
-### Enable 32-bit arch, install desktop + VNC stack
-# NOTE: tigervnc, NOT tightvnc — tightvnc has no GLX support, which causes
-# "glXChooseVisual failed" crashes with Steam later.
 sudo dpkg --add-architecture i386
 sudo apt update
 sudo apt install -y dbus-x11 dbus python3-websockify novnc xfce4 xfce4-goodies \
     tigervnc-standalone-server wget pciutils bubblewrap \
     libgl1-mesa-dri libgl1-mesa-dri:i386 libglx-mesa0 libglx-mesa0:i386 \
     mesa-utils mesa-vulkan-drivers:i386 pulseaudio vlc
+echo "-> desktop packages installed"
 
-### VNC password + startup script
+step "Configuring VNC (password + startup script)"
 mkdir -p ~/.vnc
 echo "vscode" | vncpasswd -f > ~/.vnc/passwd
 chmod 600 ~/.vnc/passwd
@@ -33,15 +54,17 @@ export LIBGL_ALWAYS_SOFTWARE=1
 exec startxfce4
 XEOF
 chmod +x ~/.vnc/xstartup
+echo "-> VNC configured (password: vscode)"
 
-### Start dbus now (also happens on every start via start.sh)
+step "Starting dbus + expanding shared memory"
 sudo service dbus start 2>/dev/null || (sudo mkdir -p /run/dbus && sudo dbus-daemon --system --fork)
-
-### Expand /dev/shm — default 64MB makes Chromium-based apps (Steam/Discord) crash-loop/flicker
 sudo mount -t tmpfs -o size=2G tmpfs /dev/shm
+echo "-> dbus running, /dev/shm expanded to 2G"
 
-### --- Steam ---
-wget -q https://cdn.cloudflare.steamstatic.com/client/installer/steam.deb -O /tmp/steam.deb
+step "Installing Steam"
+echo "Downloading Steam installer..."
+wget --progress=dot:giga https://cdn.cloudflare.steamstatic.com/client/installer/steam.deb -O /tmp/steam.deb
+echo "Download complete, installing..."
 sudo apt install -y /tmp/steam.deb
 rm /tmp/steam.deb
 
@@ -51,6 +74,7 @@ find ~/.local/share/Steam -name "bwrap" -exec sudo chmod u+s {} + 2>/dev/null ||
 # IMPORTANT: search PATH excluding /usr/local/bin, or this wrapper ends up
 # calling itself forever on a rerun (100% CPU, no window, ever).
 REAL_STEAM_BIN=$(PATH=/usr/games:/usr/bin:/bin command -v steam)
+echo "Real Steam binary resolved to: $REAL_STEAM_BIN"
 sudo tee /usr/local/bin/steam-wrapped > /dev/null << EOF
 #!/bin/bash
 export DISPLAY=:1
@@ -68,13 +92,17 @@ for f in /usr/share/applications/steam.desktop \
          ~/.local/share/applications/steam.desktop; do
   [ -f "$f" ] && sudo sed -i "s|^Exec=.*|Exec=/usr/local/bin/steam-wrapped %U|" "$f" 2>/dev/null
 done
+echo "-> Steam installed and wrapped"
 
-### --- Discord ---
-wget -q -O /tmp/discord.deb "https://discord.com/api/download?platform=linux&format=deb"
+step "Installing Discord"
+echo "Downloading Discord installer..."
+wget --progress=dot:giga -O /tmp/discord.deb "https://discord.com/api/download?platform=linux&format=deb"
+echo "Download complete, installing..."
 sudo apt-get update && sudo apt-get install -y /tmp/discord.deb
 rm /tmp/discord.deb
 
 REAL_DISCORD_BIN=$(PATH=/usr/games:/usr/bin:/bin command -v discord)
+echo "Real Discord binary resolved to: $REAL_DISCORD_BIN"
 sudo tee /usr/local/bin/discord-wrapped > /dev/null << EOF
 #!/bin/bash
 export DISPLAY=:1
@@ -88,14 +116,27 @@ for f in /usr/share/applications/discord.desktop \
          ~/.local/share/applications/discord.desktop; do
   [ -f "$f" ] && sudo sed -i "s|^Exec=.*|Exec=/usr/local/bin/discord-wrapped %U|" "$f" 2>/dev/null
 done
+echo "-> Discord installed and wrapped"
 
-### --- Firefox (real deb from Mozilla, not the missing firefox-esr / snap stub) ---
+step "Installing Firefox (Mozilla's official repo)"
 sudo install -d -m 0755 /etc/apt/keyrings
 wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
 echo -e "Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000" | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
 sudo apt update
 sudo apt install -y firefox
+echo "-> Firefox installed"
 
-echo ""
-echo "Setup finished! The desktop will start automatically."
+step "Verifying everything installed correctly"
+for bin in steam discord firefox vncserver websockify; do
+  if command -v "$bin" >/dev/null 2>&1; then
+    echo "  [OK] $bin found at $(command -v "$bin")"
+  else
+    echo "  [MISSING] $bin was not found on PATH!"
+  fi
+done
+
+step "Done"
+echo "Setup finished successfully at $(date '+%H:%M:%S')."
+echo "Full log saved at: $LOG_FILE"
+echo "The desktop itself starts via start.sh (postStartCommand) — check the Ports tab for 6080."
