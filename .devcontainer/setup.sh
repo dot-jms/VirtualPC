@@ -27,10 +27,26 @@ echo "Starting full setup. This normally takes 5-10 minutes total —"
 echo "long gaps of no new output during 'apt install' steps are NORMAL,"
 echo "it's downloading/unpacking packages, not frozen."
 
-step "Clearing any apt locks"
-sudo killall apt apt-get dpkg 2>/dev/null || true
+step "Waiting for any background apt/dpkg activity to clear"
+# Fresh Ubuntu containers run 'unattended-upgrades' on first boot, which holds
+# the package lock for a few minutes. A single killall can race against it
+# respawning. This loop actually waits it out and prints progress, so it's
+# visible that we're waiting on THIS specifically instead of looking hung.
+WAIT_SECONDS=0
+MAX_WAIT=300
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+  if [ "$WAIT_SECONDS" -ge "$MAX_WAIT" ]; then
+    echo "-> Lock still held after ${MAX_WAIT}s, forcing it clear..."
+    sudo killall apt apt-get dpkg unattended-upgrade 2>/dev/null || true
+    sleep 3
+    break
+  fi
+  echo "-> Package lock held by another process (probably unattended-upgrades on first boot), waiting... (${WAIT_SECONDS}s elapsed)"
+  sleep 10
+  WAIT_SECONDS=$((WAIT_SECONDS+10))
+done
 sudo dpkg --configure -a
-echo "-> done"
+echo "-> apt/dpkg is free, continuing"
 
 step "Installing desktop + VNC stack (this is the biggest step, ~2-4 min)"
 export DEBIAN_FRONTEND=noninteractive
